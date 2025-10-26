@@ -302,10 +302,10 @@ def get_market_data():
 @app.route("/api/record-history", methods=['POST'])
 def record_portfolio_history():
     """
-    Wird vom GitHub/Render Cron Job aufgerufen, um den aktuellen Wert
+    Wird vom GitHub Cron Job aufgerufen, um den aktuellen Wert
     aller Portfolios in die Supabase-Tabelle 'portfolio_history' zu schreiben.
     """
-    # 1. Sicherer Endpunkt, den nur der Cron Job aufrufen kann
+    # 1. Sicherer Endpunkt
     auth_header = request.headers.get('Authorization')
     if not CRON_SECRET or auth_header != f"Bearer {CRON_SECRET}":
         print("Cron Job Fehler: Nicht autorisierter Zugriff.")
@@ -315,7 +315,7 @@ def record_portfolio_history():
     db = get_db()
     with db.cursor(cursor_factory=RealDictCursor) as cursor:
         
-        # 2. Hole alle User-IDs aus der 'accounts'-Tabelle
+        # 2. Hole alle User-IDs
         cursor.execute("SELECT DISTINCT user_id FROM accounts")
         users = cursor.fetchall()
         
@@ -324,7 +324,7 @@ def record_portfolio_history():
             user_id = user['user_id']
             
             try:
-                # 3. Berechne den Gesamtwert für jeden User
+                # 3. Berechne den Gesamtwert
                 cursor.execute("SELECT cash_balance FROM accounts WHERE user_id = %s", (user_id,))
                 account = cursor.fetchone()
                 cash_balance = account['cash_balance'] if account else 0
@@ -335,22 +335,25 @@ def record_portfolio_history():
                 total_asset_value = 0
                 for pos in positions:
                     ticker_data = get_ticker_info(pos['ticker_symbol'])
-                    if ticker_data:
+                    # WICHTIG: Prüfen ob ticker_data und price existieren und numerisch sind
+                    if ticker_data and isinstance(ticker_data.get('price'), (int, float)):
                         total_asset_value += ticker_data['price'] * pos['quantity']
-                        
+                    else:
+                        print(f"Warnung: Konnte Preis für {pos['ticker_symbol']} nicht abrufen oder Preis ist ungültig.")
+
                 total_portfolio_value = cash_balance + total_asset_value
                 
-                # 4. Speichere den Wert in der neuen Tabelle
+                # 4. Speichere den Wert
                 cursor.execute(
                     "INSERT INTO portfolio_history (user_id, value) VALUES (%s, %s)",
-                    (user_id, total_portfolio_value)
+                    (user_id, total_portfolio_value) # Sicherstellen, dass 'value' eine Zahl ist
                 )
                 count += 1
                 
             except Exception as e:
                 print(f"Fehler bei Aufzeichnung für User {user_id}: {e}")
         
-        db.commit() # Speichere alle Einträge
+        db.commit() 
     
     print(f"Cron Job: {count} Portfolio-Werte erfolgreich gespeichert.")
     return jsonify({"message": f"{count} Portfolio-Werte erfolgreich gespeichert."}), 200
@@ -359,10 +362,9 @@ def record_portfolio_history():
 @app.route("/portfolio/<user_id>/history", methods=['GET'])
 def get_portfolio_history(user_id):
     """
-    Dieser Endpunkt wird vom Frontend (Netlify) aufgerufen.
-    Er liest die gespeicherten Daten aus der 'portfolio_history' Tabelle.
+    Wird vom Frontend (Netlify) aufgerufen, liest gespeicherte Daten.
     """
-    range = request.args.get('range', '1d').lower() # z.B. ?range=1w
+    range = request.args.get('range', '1d').lower()
     
     db = get_db()
     with db.cursor(cursor_factory=RealDictCursor) as cursor:
@@ -370,11 +372,11 @@ def get_portfolio_history(user_id):
         # 1. Wähle das richtige Zeitintervall
         
         if range == '1d':
-            # NEU: Zeigt den *aktuellen Tag* von 00:00 Uhr bis jetzt
+            # Zeigt den *aktuellen Tag* von 00:00 Uhr bis jetzt
             sql = """
                 SELECT created_at as timestamp, value
                 FROM portfolio_history
-                WHERE user_id = %s AND created_at >= date_trunc('day', NOW())
+                WHERE user_id = %s AND created_at >= date_trunc('day', NOW() AT TIME ZONE 'UTC') -- UTC verwenden für Konsistenz
                 ORDER BY created_at ASC;
             """
             params = (user_id,)
@@ -385,7 +387,7 @@ def get_portfolio_history(user_id):
             sql = """
                 SELECT created_at as timestamp, value
                 FROM portfolio_history
-                WHERE user_id = %s AND created_at >= NOW() - INTERVAL %s
+                WHERE user_id = %s AND created_at >= NOW() AT TIME ZONE 'UTC' - INTERVAL %s
                 ORDER BY created_at ASC;
             """
             params = (user_id, interval)
@@ -396,45 +398,53 @@ def get_portfolio_history(user_id):
             sql = """
                 SELECT created_at as timestamp, value
                 FROM portfolio_history
-                WHERE user_id = %s AND created_at >= NOW() - INTERVAL %s
+                WHERE user_id = %s AND created_at >= NOW() AT TIME ZONE 'UTC' - INTERVAL %s
                 ORDER BY created_at ASC;
             """
             params = (user_id, interval)
 
         elif range == '1y':
             interval = '1 year'
-            # Bündelt die Daten auf einen Wert pro Tag
+            # Bündelt die Daten auf einen Wert pro Tag (Durchschnitt)
             sql = """
                 SELECT 
-                  date_trunc('day', created_at) as timestamp,
+                  date_trunc('day', created_at AT TIME ZONE 'UTC') as timestamp, -- Bündelt auf den UTC-Tag
                   AVG(value) as value
                 FROM portfolio_history
-                WHERE user_id = %s AND created_at >= NOW() - INTERVAL %s
+                WHERE user_id = %s AND created_at >= NOW() AT TIME ZONE 'UTC' - INTERVAL %s
                 GROUP BY 1 
                 ORDER BY 1 ASC;
             """
             params = (user_id, interval)
             
         else: # Fallback
-            interval = '1 day'
+             # Standardmäßig den aktuellen Tag zeigen
             sql = """
                 SELECT created_at as timestamp, value
                 FROM portfolio_history
-                WHERE user_id = %s AND created_at >= NOW() - INTERVAL %s
+                WHERE user_id = %s AND created_at >= date_trunc('day', NOW() AT TIME ZONE 'UTC')
                 ORDER BY created_at ASC;
             """
-            params = (user_id, interval)
+            params = (user_id,)
 
         # 2. Führe die Abfrage aus
         cursor.execute(sql, params)
         history_data = cursor.fetchall()
         
+        # WICHTIG: Konvertiere Decimal zu float für JSON
+        for row in history_data:
+            if 'value' in row and row['value'] is not None:
+                row['value'] = float(row['value'])
+            # Konvertiere datetime zu ISO 8601 String (Standard für JSON)
+            if 'timestamp' in row and row['timestamp'] is not None:
+                 row['timestamp'] = row['timestamp'].isoformat()
+
+
         # 3. Sende die Daten als JSON
         return jsonify(history_data), 200
 
 
 # --- Den Server starten ---
 if __name__ == "__main__":
-    # WICHTIG: Port wird von Render.com vorgegeben
     port = int(os.environ.get('PORT', 5000))
     app.run(debug=False, host='0.0.0.0', port=port)
