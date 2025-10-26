@@ -74,7 +74,7 @@ def get_ticker_info(ticker_symbol):
         print(f"Fehler beim Abrufen der Ticker-Info für {ticker_symbol}: {e}")
         return None
 
-# --- 1. Die API-Endpunkte (DEIN BESTEHENDER CODE) ---
+# --- 1. Die API-Endpunkte (Bestehender Code) ---
 
 @app.route("/")
 def index():
@@ -302,8 +302,7 @@ def get_market_data():
 @app.route("/api/record-history", methods=['POST'])
 def record_portfolio_history():
     """
-    NEUER ENDPUNKT (Schritt 2)
-    Wird vom Render Cron Job aufgerufen, um den aktuellen Wert
+    Wird vom GitHub/Render Cron Job aufgerufen, um den aktuellen Wert
     aller Portfolios in die Supabase-Tabelle 'portfolio_history' zu schreiben.
     """
     # 1. Sicherer Endpunkt, den nur der Cron Job aufrufen kann
@@ -326,8 +325,6 @@ def record_portfolio_history():
             
             try:
                 # 3. Berechne den Gesamtwert für jeden User
-                # (Vereinfachte Logik von /portfolio/<user_id>, da wir nicht alle Details brauchen)
-                
                 cursor.execute("SELECT cash_balance FROM accounts WHERE user_id = %s", (user_id,))
                 account = cursor.fetchone()
                 cash_balance = account['cash_balance'] if account else 0
@@ -337,7 +334,6 @@ def record_portfolio_history():
                 
                 total_asset_value = 0
                 for pos in positions:
-                    # Nutze die bestehende Funktion, um den aktuellen Preis zu holen
                     ticker_data = get_ticker_info(pos['ticker_symbol'])
                     if ticker_data:
                         total_asset_value += ticker_data['price'] * pos['quantity']
@@ -353,7 +349,6 @@ def record_portfolio_history():
                 
             except Exception as e:
                 print(f"Fehler bei Aufzeichnung für User {user_id}: {e}")
-                # Nicht abbrechen, mit nächstem User weitermachen
         
         db.commit() # Speichere alle Einträge
     
@@ -364,7 +359,6 @@ def record_portfolio_history():
 @app.route("/portfolio/<user_id>/history", methods=['GET'])
 def get_portfolio_history(user_id):
     """
-    NEUER ENDPUNKT (Schritt 3)
     Dieser Endpunkt wird vom Frontend (Netlify) aufgerufen.
     Er liest die gespeicherten Daten aus der 'portfolio_history' Tabelle.
     """
@@ -374,9 +368,20 @@ def get_portfolio_history(user_id):
     with db.cursor(cursor_factory=RealDictCursor) as cursor:
         
         # 1. Wähle das richtige Zeitintervall
-        if range == '1w':
+        
+        if range == '1d':
+            # NEU: Zeigt den *aktuellen Tag* von 00:00 Uhr bis jetzt
+            sql = """
+                SELECT created_at as timestamp, value
+                FROM portfolio_history
+                WHERE user_id = %s AND created_at >= date_trunc('day', NOW())
+                ORDER BY created_at ASC;
+            """
+            params = (user_id,)
+            
+        elif range == '1w':
             interval = '7 days'
-            # Für 1W: Nimm alle stündlichen Datenpunkte
+            # Zeigt die *letzten 7 Tage* (rollierend)
             sql = """
                 SELECT created_at as timestamp, value
                 FROM portfolio_history
@@ -387,7 +392,7 @@ def get_portfolio_history(user_id):
             
         elif range == '1m':
             interval = '1 month'
-            # Für 1M: Nimm auch alle stündlichen Datenpunkte
+            # Zeigt den *letzten Monat* (rollierend)
             sql = """
                 SELECT created_at as timestamp, value
                 FROM portfolio_history
@@ -398,20 +403,19 @@ def get_portfolio_history(user_id):
 
         elif range == '1y':
             interval = '1 year'
-            # WICHTIG: Für 1Y die Daten bündeln (z.B. 1 Wert pro Tag)
-            # Sonst sendest du >8000 Datenpunkte
+            # Bündelt die Daten auf einen Wert pro Tag
             sql = """
                 SELECT 
-                  date_trunc('day', created_at) as timestamp, -- Bündelt auf den Tag
-                  AVG(value) as value -- Nimmt den Durchschnittswert des Tages
+                  date_trunc('day', created_at) as timestamp,
+                  AVG(value) as value
                 FROM portfolio_history
                 WHERE user_id = %s AND created_at >= NOW() - INTERVAL %s
-                GROUP BY 1 -- Gruppiert nach dem "timestamp" (dem Tag)
-                ORDER BY 1 ASC; -- Sortiert nach dem Tag
+                GROUP BY 1 
+                ORDER BY 1 ASC;
             """
             params = (user_id, interval)
             
-        else: # Fallback für "1d" (den das Frontend nicht nutzt, aber sicher ist sicher)
+        else: # Fallback
             interval = '1 day'
             sql = """
                 SELECT created_at as timestamp, value
@@ -426,8 +430,6 @@ def get_portfolio_history(user_id):
         history_data = cursor.fetchall()
         
         # 3. Sende die Daten als JSON
-        # Das Format (Liste von Dicts mit "timestamp" and "value")
-        # passt genau zu dem, was das Frontend erwartet.
         return jsonify(history_data), 200
 
 
